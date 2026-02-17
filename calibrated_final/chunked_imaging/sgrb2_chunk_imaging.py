@@ -111,7 +111,9 @@ MS_UIDS = [
 if cfg['use_temp_line']:
     vis_list = [f"{BASE}/temp_line/{uid}_{cfg['ms_key']}_spw{spw}_line.ms" for uid in MS_UIDS]
     datacolumn = 'data'
-    spw_selection = ''
+    # CRITICAL: temp_line MS files contain ALL SPWs (not split), so we MUST specify the SPW
+    # The SPW numbers in temp_line MS are still 23, 25, 27, 29 (not renumbered)
+    spw_selection = str(spw)
 else:
     vis_list = [f"{BASE}/measurement_sets/{uid}_targets_line.ms" for uid in MS_UIDS]
     datacolumn = 'corrected'
@@ -127,7 +129,7 @@ if missing:
 # SPW 25,27: 1920 channels, use native gridding
 # SPW 29: 3840 channels (highest resolution SPW), use native gridding
 SPW_PARAMS = {
-    '23': {'totalnchan': 1916, 'start': '132.8931835956GHz', 'width': '0.9766485MHz'},
+    '23': {'totalnchan': 1916, 'start': '', 'width': ''},
     '25': {'totalnchan': 1920, 'start': '', 'width': ''},
     '27': {'totalnchan': 1920, 'start': '', 'width': ''},
     '29': {'totalnchan': 3840, 'start': '', 'width': ''},
@@ -179,12 +181,121 @@ if domerge:
         print(f"Merging {len(existing)} files into {outfile}")
         ia.imageconcat(outfile=outfile, infiles=existing, mode='p', relax=True)
 
+    # Create .image if it doesn't exist
+    outimage = f'{basename}.cube.I.image'
+    if not os.path.exists(outimage):
+        print(f"\n.image does not exist, creating from model+residual with common beam...")
+        
+        # Determine common beam from merged .psf or first chunk
+        merged_psf = f'{basename}.cube.I.psf'
+        if os.path.exists(merged_psf):
+            ia.open(merged_psf)
+            beam_info = ia.restoringbeam()
+            ia.close()
+            if 'beams' in beam_info:
+                # Multi-beam case: use median beam
+                # Each channel has a beam stored as beams['*0']['*0'], beams['*1']['*0'], etc.
+                major_list = []
+                minor_list = []
+                pa_list = []
+                for chan_key in beam_info['beams']:
+                    beam = beam_info['beams'][chan_key]['*0']  # Get the single beam for this channel
+                    major_list.append(beam['major']['value'])
+                    minor_list.append(beam['minor']['value'])
+                    pa_list.append(beam['positionangle']['value'])
+                
+                import numpy as np
+                major_unit = list(beam_info['beams'].values())[0]['*0']['major']['unit']
+                minor_unit = list(beam_info['beams'].values())[0]['*0']['minor']['unit']
+                pa_unit = list(beam_info['beams'].values())[0]['*0']['positionangle']['unit']
+                
+                common_beam = {
+                    'major': {'value': np.median(major_list), 'unit': major_unit},
+                    'minor': {'value': np.median(minor_list), 'unit': minor_unit},
+                    'pa': {'value': np.median(pa_list), 'unit': pa_unit}
+                }
+            else:
+                # Single beam case
+                common_beam = {
+                    'major': beam_info['major'],
+                    'minor': beam_info['minor'],
+                    'pa': beam_info.get('positionangle', beam_info.get('pa'))
+                }
+            print(f"  Common beam: {common_beam['major']['value']:.3f}{common_beam['major']['unit']} x {common_beam['minor']['value']:.3f}{common_beam['minor']['unit']}, PA={common_beam['pa']['value']:.1f}{common_beam['pa']['unit']}")
+        else:
+            raise FileNotFoundError(f"Cannot determine common beam: {merged_psf} not found")
+        
+        # Process each chunk: convolve model and add to residual
+        chunk_images = []
+        for ii in range(0, totalnchan, nchan_chunk):
+            chunk_base = f'{basename}.{ii:04d}+{nchan_chunk:03d}.cube.I'
+            chunk_model = f'{chunk_base}.model'
+            chunk_residual = f'{chunk_base}.residual'
+            chunk_image = f'{chunk_base}.image'
+            
+            if not os.path.exists(chunk_model) or not os.path.exists(chunk_residual):
+                print(f"  SKIPPING chunk {ii:04d}: model or residual missing")
+                continue
+            
+            if os.path.exists(chunk_image):
+                print(f"  Chunk {ii:04d}: .image already exists")
+                chunk_images.append(chunk_image)
+                continue
+            
+            print(f"  Creating chunk {ii:04d} .image...")
+            
+            # Convolve model to common beam
+            chunk_model_conv = f'{chunk_base}.model.conv'
+            if os.path.exists(chunk_model_conv):
+                shutil.rmtree(chunk_model_conv)
+            
+            imsmooth(
+                imagename=chunk_model,
+                kernel='gauss',
+                major=f"{common_beam['major']['value']}{common_beam['major']['unit']}",
+                minor=f"{common_beam['minor']['value']}{common_beam['minor']['unit']}",
+                pa=f"{common_beam['pa']['value']}{common_beam['pa']['unit']}",
+                targetres=True,
+                outfile=chunk_model_conv
+            )
+            
+            # Add convolved model to residual
+            immath(
+                imagename=[chunk_model_conv, chunk_residual],
+                expr='IM0 + IM1',
+                outfile=chunk_image
+            )
+            
+            # Set proper restoring beam in header
+            ia.open(chunk_image)
+            ia.setrestoringbeam(
+                major=f"{common_beam['major']['value']}{common_beam['major']['unit']}",
+                minor=f"{common_beam['minor']['value']}{common_beam['minor']['unit']}",
+                pa=f"{common_beam['pa']['value']}{common_beam['pa']['unit']}"
+            )
+            ia.close()
+            
+            # Clean up temporary convolved model
+            shutil.rmtree(chunk_model_conv)
+            
+            chunk_images.append(chunk_image)
+        
+        # Concatenate chunk .image files
+        if chunk_images:
+            print(f"\n  Concatenating {len(chunk_images)} chunk .image files...")
+            ia.imageconcat(outfile=outimage, infiles=chunk_images, mode='p', relax=True)
+            print(f"  Created {outimage}")
+        else:
+            print("  ERROR: No chunk .image files to concatenate")
+    else:
+        print(f"\n.image already exists: {outimage}")
+
     # Cleanup: remove chunk files after successful merge
     cleanup = os.getenv('CLEANUP_CHUNKS', '1') == '1'
     if cleanup:
         print("\nCleaning up chunk files...")
         cleaned = 0
-        for suffix in (".residual", ".model", ".mask", ".pb", ".psf", ".weight", ".sumwt"):
+        for suffix in (".residual", ".model", ".mask", ".pb", ".psf", ".weight", ".sumwt", ".image"):
             merged = f'{basename}.cube.I{suffix}'
             if not os.path.exists(merged):
                 print(f"  Skipping cleanup for {suffix}: merged file does not exist")

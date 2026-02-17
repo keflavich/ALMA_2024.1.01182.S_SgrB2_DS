@@ -66,7 +66,7 @@ export DOMERGE=0
 
 # Set up CASA environment
 LOG_DIR="/orange/adamginsburg/sgrb2/2024.1.01182.S/calibrated_final/logs"
-LOGFILE="${LOG_DIR}/casa_chunk_${SLURM_JOB_ID}.log"
+LOGFILE="${LOG_DIR}/casa_chunk_${FIELD}_spw${SPW}_${SLURM_JOB_ID}.log"
 
 # Run CASA using the working pattern from brick scripts
 ${CASA_PATH} --logfile=${LOGFILE} --nogui --nologger --cachedir=$SLURM_TMPDIR -c "execfile('${SCRIPT}')"
