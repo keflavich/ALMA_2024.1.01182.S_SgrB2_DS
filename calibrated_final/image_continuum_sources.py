@@ -94,8 +94,13 @@ for source_name, source_info in SOURCES.items():
     parent_field = SOURCE_TO_FIELD[source_name]
     cfg = FIELD_CONFIG[parent_field]
     
-    # Format phasecenter
-    phasecenter = f"ICRS {source_info['ra']} {source_info['dec']}"
+    # Format phasecenter with explicit units for CASA
+    # Convert HH:MM:SS.S to HHhMMmSS.Ss and DD:MM:SS.S to DDdMMmSS.Ss
+    ra_parts = source_info['ra'].split(':')
+    dec_parts = source_info['dec'].split(':')
+    ra_casa = f"{ra_parts[0]}h{ra_parts[1]}m{ra_parts[2]}s"
+    dec_casa = f"{dec_parts[0]}d{dec_parts[1]}m{dec_parts[2]}s"
+    phasecenter = f"ICRS {ra_casa} {dec_casa}"
     
     print(f"\n{'='*70}")
     print(f"Source: {source_name} (in field {parent_field})")
@@ -179,13 +184,8 @@ for source_name, source_info in SOURCES.items():
             nsigma=0.0,
             interactive=False,
             fullsummary=False,
-            usemask='auto-multithresh',
-            sidelobethreshold=2.5,
-            noisethreshold=5.0,
-            lownoisethreshold=1.5,
-            negativethreshold=0.0,
-            minbeamfrac=0.3,
-            growiterations=75,
+            usemask='pb',  # Use pb mask instead of auto-multithresh to avoid segfaults
+            pbmask=0.2,
             restart=True,
             calcres=True,
             calcpsf=True,
